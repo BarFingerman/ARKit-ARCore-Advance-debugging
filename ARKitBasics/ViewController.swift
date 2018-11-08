@@ -8,16 +8,45 @@ Main view controller for the AR experience.
 import UIKit
 import SceneKit
 import ARKit
+import MessageUI
 
-class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
+
+struct DebugPoint {
+    
+    var x: Float
+    var y: Float
+    var z: Float
+    
+    init(from vector: SCNVector3) {
+        
+        self.x = vector.x
+        self.y = vector.y
+        self.z = vector.z
+    }
+}
+
+class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate, MFMailComposeViewControllerDelegate {
+    
+    
     // MARK: - IBOutlets
-
     @IBOutlet weak var sessionInfoView: UIView!
     @IBOutlet weak var sessionInfoLabel: UILabel!
     @IBOutlet weak var sceneView: ARSCNView!
 
+    
+    @IBAction func saveDebugData(_ sender: Any) {
+        
+        if #available(iOS 12.0, *) {
+            saveWroldMap()
+        }
+    }
+    
+    
+    var previousPoint: SCNVector3?
+    var userPath: [DebugPoint] = []
+    
+    
     // MARK: - View Life Cycle
-
     /// - Tag: StartARSession
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
@@ -46,8 +75,8 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         sceneView.session.pause()
     }
 
-    // MARK: - ARSCNViewDelegate
     
+    // MARK: - ARSCNViewDelegate
     /// - Tag: PlaceARContent
     func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
         // Place content only for anchors found by plane detection.
@@ -61,6 +90,25 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         node.addChildNode(plane)
     }
 
+    func renderer(_ renderer: SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        
+        guard let pointOfView = sceneView.pointOfView else { return }
+        let mat = pointOfView.transform
+        let dir = SCNVector3(-1 * mat.m31, -1 * mat.m32, -1 * mat.m33)
+        let currentPosition = pointOfView.position + (dir * 0.1)
+        userPath.append(DebugPoint(from: currentPosition))
+
+        
+        if let previousPoint = previousPoint {
+            let line = lineFrom(vector: previousPoint, toVector: currentPosition)
+            let lineNode = SCNNode(geometry: line)
+            lineNode.geometry?.firstMaterial?.diffuse.contents = UIColor.white
+            sceneView.scene.rootNode.addChildNode(lineNode)
+        }
+        previousPoint = currentPosition
+        glLineWidth(20)
+    }
+    
     /// - Tag: UpdateARContent
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
         // Update only anchors and nodes set up by `renderer(_:didAdd:for:)`.
@@ -93,8 +141,8 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         
     }
 
+    
     // MARK: - ARSessionDelegate
-
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         guard let frame = session.currentFrame else { return }
         updateSessionInfoLabel(for: frame, trackingState: frame.camera.trackingState)
@@ -109,8 +157,8 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         updateSessionInfoLabel(for: session.currentFrame!, trackingState: camera.trackingState)
     }
 
+    
     // MARK: - ARSessionObserver
-
     func sessionWasInterrupted(_ session: ARSession) {
         // Inform the user that the session has been interrupted, for example, by presenting an overlay.
         sessionInfoLabel.text = "Session was interrupted"
@@ -148,8 +196,8 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
     }
 
+    
     // MARK: - Private methods
-
     private func updateSessionInfoLabel(for frame: ARFrame, trackingState: ARCamera.TrackingState) {
         // Update the UI to provide feedback on the state of the AR experience.
         let message: String
@@ -186,5 +234,87 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = [.horizontal, .vertical]
         sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+    }
+    
+    
+    @available(iOS 12.0, *)
+    func saveWroldMap() {
+     
+        sceneView.session.getCurrentWorldMap { [weak self] worldMap, error in
+            guard let self = self else { return }
+            guard let worldMap = worldMap else { return  }
+            guard let plyFileData = worldMap.convertToPlyFile(with: self.userPath) else { return }
+            guard MFMailComposeViewController.canSendMail() else { return }
+            let vc = MFMailComposeViewController(
+                initWithSubject: "AR point cloud file",
+                body: "See attachment",
+                tintColor: UIColor.purple,
+                delegate: self,
+                recipients: []
+            )
+            vc.addAttachmentData(plyFileData, mimeType: "ply", fileName: "\(UUID().uuidString).ply")
+            self.present(vc, animated: true, completion: nil)
+        }
+    }
+    
+    func mailComposeController(_ controller: MFMailComposeViewController, didFinishWith result: MFMailComposeResult, error: Error?) {
+        
+        controller.dismiss(animated: true)
+    }
+    
+    func lineFrom(vector vector1: SCNVector3, toVector vector2: SCNVector3) -> SCNGeometry {
+        
+        let indices: [Int32] = [0, 1]
+        
+        let source = SCNGeometrySource(vertices: [vector1, vector2])
+        let element = SCNGeometryElement(indices: indices, primitiveType: .line)
+        
+        return SCNGeometry(sources: [source], elements: [element])
+    }
+}
+
+
+
+
+extension MFMailComposeViewController {
+    
+    convenience init(initWithSubject subject: String, body: String, tintColor: UIColor, delegate: MFMailComposeViewControllerDelegate?, recipients: [String]) {
+        self.init()
+        
+        self.navigationBar.tintColor = tintColor
+        self.mailComposeDelegate = delegate
+        self.setToRecipients(recipients)
+        self.setSubject(subject)
+        self.setMessageBody(body, isHTML: true)
+    }
+}
+
+@available(iOS 12.0, *)
+extension ARWorldMap {
+    
+    func convertToPlyFile(with userPath: [DebugPoint]) -> Data? {
+        
+        var featurePoints: String = ""
+        for (index, point) in rawFeaturePoints.points.enumerated() {
+            let newLine = index != rawFeaturePoints.points.count - 1 ? "\n" : ""
+            featurePoints += "\(point.x) \(point.y) \(point.z)\(newLine)"
+        }
+        var userPathPoints: String = ""
+        userPath.forEach({ point in
+            userPathPoints += "\(point.x) \(point.y) \(point.z)\n"
+        })
+        let fileContent = """
+        ply
+        format ascii 1.0
+        element vertex \(rawFeaturePoints.__count + userPath.count)
+        property float x
+        property float y
+        property float z
+        end_header
+        \(featurePoints)
+        \(userPathPoints)
+        """
+        
+        return fileContent.data(using: .utf8)
     }
 }
